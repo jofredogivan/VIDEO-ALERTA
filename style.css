@@ -1,0 +1,61 @@
+/* Limpando o CSS. Mantemos apenas as cores de status e customizações finas */
+
+body {
+    background-color: #f4f7f9; /* Fundo mais suave */
+}
+
+/* CORES DE STATUS */
+/* Usamos a sintaxe de classe de célula (td) e !important para forçar as cores sobre o Bootstrap table-striped. */
+#clientTable .status-Inativa td, #tratativaTable .status-Inativa td { 
+    background-color: #f8d7da !important; /* Vermelho claro */
+    color: #721c24 !important; /* Texto escuro para contraste */
+} 
+#clientTable .status-Parcial td, #tratativaTable .status-Parcial td { 
+    background-color: #ffe066 !important; /* Amarelo claro */
+    color: #856404 !important; /* Texto escuro para contraste */
+} 
+#clientTable .status-Sem-Imagem td, #tratativaTable .status-Sem-Imagem td { 
+    background-color: #ffc299 !important; /* Salmão/Laranja claro */
+    color: #85532a !important; /* Texto escuro para contraste */
+} 
+#clientTable .status-OK td, #tratativaTable .status-OK td { 
+    background-color: #d4edda !important; /* Verde claro */
+    color: #155724 !important; /* Texto verde escuro */
+} 
+#clientTable .status-Cancelada td, #tratativaTable .status-Cancelada td { 
+    background-color: #e9ecef !important; /* Cinza claro */
+    color: #495057 !important; /* Texto cinza escuro */
+} 
+
+
+/* Estilo dos Botões de Ação (Ajustando-os ao padrão Bootstrap) */
+.edit-btn {
+    background-color: #17a2b8; /* Info/Cyan */
+    color: white;
+    border: none;
+    padding: 5px 10px;
+    font-size: 13px;
+    margin-right: 5px;
+}
+.edit-btn:hover {
+    background-color: #138496;
+}
+
+.delete-btn {
+    background-color: #f8d7da; /* Aviso/Claro */
+    color: #721c24; /* Texto Escuro */
+    border: 1px solid #f5c6cb;
+    padding: 5px 10px;
+    font-size: 13px;
+}
+.delete-btn:hover {
+    background-color: #f5c6cb;
+}
+
+/* Estilo para a barra de pesquisa (garante espaçamento) */
+.search-group {
+    padding: 15px;
+    border: 1px solid #ddd;
+    border-radius: 4px;
+    margin-bottom: 20px;
+}
