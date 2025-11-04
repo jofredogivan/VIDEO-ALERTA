@@ -1,4 +1,4 @@
-const CACHE_NAME = 'video-alerta-dashboard-v2'; 
+const CACHE_NAME = 'video-alerta-dashboard-v2.1'; 
 const urlsToCache = [
     '/',
     'index.html',
@@ -55,4 +55,5 @@ self.addEventListener('activate', event => {
             );
         })
     );
+
 });
