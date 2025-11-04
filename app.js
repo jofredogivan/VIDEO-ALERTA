@@ -2,16 +2,18 @@
 // PARTE 1: CONFIGURAÇÃO DO INDEXEDDB
 // ==========================================
 const DB_NAME = 'CamerasDB';
-const DB_VERSION = 2; // *** Aumentamos a versão do DB para aplicar a nova chave (keyPath) ***
+const DB_VERSION = 2; 
 const STORE_NAME = 'clientes';
+const STORE_KEY_UPDATE = 'ultimaAtualizacaoDB';
 let db;
 let statusChart = null; 
 let todosClientes = []; 
 let clientesExibidos = []; 
+let lastView = 'tratativa-view'; 
+let lastScrollPosition = 0; 
 
 function abrirDB() {
     return new Promise((resolve, reject) => {
-        // Usa a nova versão: DB_VERSION = 2
         const request = indexedDB.open(DB_NAME, DB_VERSION); 
 
         request.onerror = (event) => {
@@ -26,17 +28,18 @@ function abrirDB() {
 
         request.onupgradeneeded = (event) => {
             db = event.target.result;
-            // Se a store existir, ela é deletada e recriada para mudar a chave (necessário para IndexedDB)
             if (db.objectStoreNames.contains(STORE_NAME)) {
                 db.deleteObjectStore(STORE_NAME);
             }
-            // *** NOVO keyPath é 'numeroConta' ***
             db.createObjectStore(STORE_NAME, { keyPath: 'numeroConta' }); 
+
+            if (!db.objectStoreNames.contains(STORE_KEY_UPDATE)) {
+                db.createObjectStore(STORE_KEY_UPDATE, { keyPath: 'id' });
+            }
         };
     });
 }
 
-// Busca um único cliente pela nova chave (numeroConta)
 function buscarCliente(numeroConta) {
     return new Promise((resolve, reject) => {
         const transaction = db.transaction([STORE_NAME], 'readonly');
@@ -47,14 +50,18 @@ function buscarCliente(numeroConta) {
     });
 }
 
-function salvarCliente(clienteData) {
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction([STORE_NAME], 'readwrite');
+async function salvarCliente(clienteData) {
+    return new Promise(async (resolve, reject) => {
+        const transaction = db.transaction([STORE_NAME, STORE_KEY_UPDATE], 'readwrite');
         const store = transaction.objectStore(STORE_NAME);
-        // O método 'put' insere OU atualiza se a chave (numeroConta) já existir.
+        const storeUpdate = transaction.objectStore(STORE_KEY_UPDATE);
+
         const request = store.put(clienteData); 
 
-        request.onsuccess = () => { resolve(); };
+        request.onsuccess = () => {
+            storeUpdate.put({ id: 'lastUpdate', timestamp: new Date().toISOString() });
+            resolve(); 
+        };
         request.onerror = (event) => { console.error("Erro ao salvar cliente:", event.target.error); reject(event.target.error); };
     });
 }
@@ -69,22 +76,53 @@ function listarClientes() {
     });
 }
 
-// Excluir usa a nova chave (numeroConta)
 function excluirCliente(numeroConta) {
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction([STORE_NAME], 'readwrite');
+    return new Promise(async (resolve, reject) => {
+        const transaction = db.transaction([STORE_NAME, STORE_KEY_UPDATE], 'readwrite');
         const store = transaction.objectStore(STORE_NAME);
+        const storeUpdate = transaction.objectStore(STORE_KEY_UPDATE);
+
         const request = store.delete(numeroConta);
 
-        request.onsuccess = () => { resolve(); };
+        request.onsuccess = () => {
+            storeUpdate.put({ id: 'lastUpdate', timestamp: new Date().toISOString() });
+            resolve();
+        };
         request.onerror = (event) => { console.error("Erro ao excluir cliente:", event.target.error); reject(event.target.error); };
     });
 }
 
 
 // ==========================================
-// PARTE 2: LÓGICA DA INTERFACE (HTML/GRÁFICOS)
+// PARTE 2: LÓGICA DA INTERFACE (SPA, GRÁFICOS E TABELAS)
 // ==========================================
+
+/**
+ * Determina o horário de início do turno atual (última troca às 7h ou 19h).
+ * @returns {Date} Objeto Date com o início do turno.
+ */
+function getTurnoStartTime() {
+    const now = new Date();
+    const currentHour = now.getHours();
+    let startTime = new Date(now);
+
+    // Turno da NOITE: 19:00 até 06:59 do dia seguinte
+    if (currentHour >= 19) {
+        startTime.setHours(19, 0, 0, 0); // Hoje às 19:00
+    } 
+    // Turno do DIA: 07:00 até 18:59
+    else if (currentHour >= 7) {
+        startTime.setHours(7, 0, 0, 0); // Hoje às 07:00
+    } 
+    // Turno da NOITE que começou no dia anterior (00:00 até 06:59)
+    else {
+        // Volta para o dia anterior, 19:00
+        startTime.setDate(startTime.getDate() - 1);
+        startTime.setHours(19, 0, 0, 0); 
+    }
+    return startTime;
+}
+
 
 async function carregarDadosIniciais() {
     todosClientes = await listarClientes();
@@ -99,7 +137,79 @@ async function carregarDadosIniciais() {
     renderizarTabelaTratativa(todosClientes);
     desenharGraficos(statusContagem);
     aplicarFiltros(); 
+    checkLastUpdate(); 
+
+    // NOVO CÁLCULO: Clientes Atualizados no Turno (baseado em 7h/19h)
+    const inicioTurno = getTurnoStartTime();
+    
+    const clientesAtualizadosTurno = todosClientes.filter(cliente => {
+        if (cliente.ultimaAtualizacao) {
+            const dataAtualizacao = new Date(cliente.ultimaAtualizacao);
+            // Verifica se a atualização ocorreu APÓS o início do turno
+            return dataAtualizacao.getTime() >= inicioTurno.getTime();
+        }
+        return false;
+    }).length;
+
+
+    // Atualiza o resumo do Dashboard 
+    const totalClientes = todosClientes.length;
+    const tratativaClientes = todosClientes.filter(c => c.necessitaContato && c.status !== 'Cancelada').length;
+    
+    const summaryHtml = `
+        <h5 class="alert-heading">Resumo da Base de Clientes</h5>
+        <p class="mb-0">
+            <strong>Total de Clientes Monitorados:</strong> ${totalClientes} | 
+            <strong>Clientes em Tratativa (Atenção!):</strong> <span class="badge bg-danger">${tratativaClientes}</span>
+        </p>
+        <hr class="my-2">
+        <p class="mb-0">
+            <strong>Clientes Atualizados no Turno (Início às ${inicioTurno.toLocaleTimeString('pt-BR')}):</strong> <span class="badge bg-primary">${clientesAtualizadosTurno}</span>
+            <small class="text-muted d-block mt-1">Este número mostra as modificações realizadas desde a última troca de plantão (07h ou 19h).</small>
+        </p>
+    `;
+    const summaryElement = document.getElementById('dashboardSummary');
+    if (summaryElement) { 
+        summaryElement.innerHTML = summaryHtml;
+    }
 }
+
+
+/** * Função de Navegação SPA
+ * Implementa o retorno inteligente e o salvamento do scroll.
+ */
+window.showView = function(viewId) {
+    // 1. Salva a posição do scroll antes de mudar para o formulário
+    if (document.getElementById(viewId).style.display === 'none' && lastView !== 'form-view') {
+        lastScrollPosition = window.scrollY;
+    }
+
+    document.querySelectorAll('.page-view').forEach(view => {
+        view.style.display = 'none';
+    });
+    
+    // 2. Salva a view anterior (se não for a view de formulário)
+    if (viewId !== 'form-view') {
+        lastView = viewId;
+    }
+
+    // Se a view for tratativa ou dashboard, garante que os dados estão carregados
+    if (viewId === 'tratativa-view' || viewId === 'dashboard-view') {
+        carregarDadosIniciais(); 
+    }
+
+    document.getElementById(viewId).style.display = 'block';
+
+    // 3. Restaura o scroll para a última posição salva se voltando para a lista
+    if (viewId !== 'form-view' && lastScrollPosition > 0) {
+        setTimeout(() => {
+            window.scrollTo(0, lastScrollPosition);
+        }, 50); // Pequeno delay para renderizar a página
+    } else {
+         window.scrollTo(0, 0); 
+    }
+}
+
 
 function renderizarTabelaClientes(clientesAExibir) {
     clientesExibidos = clientesAExibir; 
@@ -111,7 +221,6 @@ function renderizarTabelaClientes(clientesAExibir) {
         const statusClass = cliente.status.replace(/ /g, '-');
         row.className = `status-${statusClass}`;
 
-        // Exibe o número da conta e o nome do cliente
         row.insertCell().textContent = cliente.numeroConta;
         row.insertCell().textContent = cliente.nomeCliente; 
         row.insertCell().textContent = cliente.status;
@@ -124,13 +233,11 @@ function renderizarTabelaClientes(clientesAExibir) {
         const editBtn = document.createElement('button');
         editBtn.textContent = 'Editar';
         editBtn.className = 'btn btn-sm edit-btn';
-        // Passa a chave (numeroConta) para edição
         editBtn.onclick = () => carregarFormularioParaEdicao(cliente); 
         
         const deleteBtn = document.createElement('button');
         deleteBtn.textContent = 'Excluir';
         deleteBtn.className = 'btn btn-sm delete-btn';
-        // Passa a chave (numeroConta) para exclusão
         deleteBtn.onclick = () => confirmarExclusao(cliente.numeroConta, cliente.nomeCliente); 
 
         actionCell.appendChild(editBtn);
@@ -145,18 +252,19 @@ function renderizarTabelaTratativa(clientes) {
     const clientesTratativa = clientes.filter(c => c.necessitaContato && c.status !== 'Cancelada');
 
     if (clientesTratativa.length === 0) {
-         document.getElementById('tratativa-view').style.display = 'none'; 
-         return;
-    } else {
-         document.getElementById('tratativa-view').style.display = 'block';
-    }
+        const row = tbody.insertRow();
+        row.insertCell(0).colSpan = 6;
+        row.cells[0].textContent = "🎉 Não há clientes necessitando de Tratativa neste momento!";
+        row.cells[0].className = "text-center table-success";
+        return;
+    } 
 
     clientesTratativa.forEach(cliente => {
         const row = tbody.insertRow();
         const statusClass = cliente.status.replace(/ /g, '-');
         row.className = `status-${statusClass}`;
 
-        row.insertCell().textContent = `${cliente.numeroConta} - ${cliente.nomeCliente}`; // Combina para visualização
+        row.insertCell().textContent = `${cliente.numeroConta} - ${cliente.nomeCliente}`; 
         row.insertCell().textContent = cliente.status;
         row.insertCell().textContent = `${cliente.camerasOk || 0} / ${cliente.totalCameras}`; 
         row.insertCell().textContent = cliente.ultimaAtualizacao ? new Date(cliente.ultimaAtualizacao).toLocaleString() : 'N/A';
@@ -166,7 +274,6 @@ function renderizarTabelaTratativa(clientes) {
         const editBtn = document.createElement('button');
         editBtn.textContent = 'Tratar/Editar';
         editBtn.className = 'btn btn-sm edit-btn';
-        // Passa a chave (numeroConta) para edição
         editBtn.onclick = () => carregarFormularioParaEdicao(cliente);
         actionCell.appendChild(editBtn);
     });
@@ -188,7 +295,6 @@ window.aplicarFiltros = function() {
 
     if (termoBusca) {
         clientesFiltrados = clientesFiltrados.filter(cliente => 
-            // Agora busca por nome do cliente OU número da conta OU observações
             cliente.nomeCliente.toLowerCase().includes(termoBusca) || 
             cliente.numeroConta.toLowerCase().includes(termoBusca) ||
             cliente.observacoes.toLowerCase().includes(termoBusca)
@@ -209,11 +315,12 @@ function confirmarExclusao(numeroConta, nomeCliente) {
     }
 }
 
-// LÓGICA DE SUBMISSÃO: Captura os dois novos campos
+// LÓGICA DE SUBMISSÃO
 document.getElementById('clientForm').addEventListener('submit', async function(e) {
     e.preventDefault(); 
 
-    const numeroConta = document.getElementById('numeroConta').value.trim();
+    // BUG FIX: O campo numeroConta pode estar desabilitado na edição, mas o valor é lido
+    const numeroConta = document.getElementById('numeroConta').value.trim(); 
     const nomeCliente = document.getElementById('nomeCliente').value.trim();
     const totalCameras = parseInt(document.getElementById('totalCameras').value);
     const camerasOk = parseInt(document.getElementById('camerasOk').value);
@@ -225,13 +332,12 @@ document.getElementById('clientForm').addEventListener('submit', async function(
 
     const statusAtual = document.getElementById('status').value;
     
-    // Verifica a existência pela nova chave: numeroConta
     const clienteExistente = await buscarCliente(numeroConta); 
     const isUpdate = !!clienteExistente;
 
     const clienteData = {
-        numeroConta: numeroConta, // *** NOVA CHAVE ***
-        nomeCliente: nomeCliente, // *** NOVO CAMPO ***
+        numeroConta: numeroConta, 
+        nomeCliente: nomeCliente, 
         totalCameras: totalCameras,
         camerasOk: camerasOk,
         status: statusAtual,
@@ -250,12 +356,9 @@ document.getElementById('clientForm').addEventListener('submit', async function(
 
         alert(successMessage);
         
-        document.getElementById('clientForm').reset(); 
-        document.getElementById('searchText').value = ''; 
-        carregarDadosIniciais(); 
-
-        document.getElementById('saveButton').textContent = 'Salvar Novo Cliente / Atualizar Status'; 
-        document.getElementById('returnButton').style.display = 'none'; 
+        // RETORNO INTELIGENTE: Volta para a última view visitada (Tratativa ou Dashboard)
+        showView(lastView); 
+        resetForm();
 
     } catch (e) {
         alert('Erro ao salvar cliente. Verifique o console para detalhes.');
@@ -263,37 +366,49 @@ document.getElementById('clientForm').addEventListener('submit', async function(
 });
 
 
-// FUNÇÕES DE UX (Scroll e Carregamento)
+// FUNÇÕES DE UX E EDIÇÃO SEM SCROLL
+function resetForm() {
+    document.getElementById('clientForm').reset();
+    document.getElementById('formTitle').textContent = 'Cadastrar Novo Cliente';
+    document.getElementById('saveButton').textContent = 'Salvar Novo Cliente / Atualizar Status';
+    document.getElementById('numeroConta').removeAttribute('disabled'); // Habilita o campo de conta
+    document.getElementById('cancelEditButton').style.display = 'none';
+    lastScrollPosition = 0; // Limpa o scroll ao sair do formulário (para não afetar a próxima navegação)
+}
+
 function carregarFormularioParaEdicao(cliente) {
-    // Carrega os dois campos
+    resetForm();
+    
+    // Carrega os dados
     document.getElementById('numeroConta').value = cliente.numeroConta;
     document.getElementById('nomeCliente').value = cliente.nomeCliente;
-    
     document.getElementById('totalCameras').value = cliente.totalCameras;
     document.getElementById('camerasOk').value = cliente.camerasOk;
     document.getElementById('status').value = cliente.status;
     document.getElementById('cobranca').checked = cliente.cobranca;
     document.getElementById('observacoes').value = cliente.observacoes;
     
-    document.getElementById('saveButton').textContent = `Atualizar Status de ${cliente.nomeCliente} (Conta: ${cliente.numeroConta})`;
-    document.getElementById('returnButton').style.display = 'inline-block'; 
+    // Configura a interface para edição
+    document.getElementById('numeroConta').setAttribute('disabled', 'true'); // Impede a alteração da CHAVE
+    document.getElementById('formTitle').textContent = `Editar/Tratar Cliente: ${cliente.nomeCliente}`;
+    document.getElementById('saveButton').textContent = `Atualizar Status de ${cliente.numeroConta}`;
+    document.getElementById('cancelEditButton').style.display = 'inline-block'; 
 
-    document.getElementById('form-section').scrollIntoView({ behavior: 'smooth' });
+    // Navega para a tela de formulário
+    showView('form-view');
 }
 
-window.retornarParaLista = function() {
-    document.getElementById('tratativa-view').scrollIntoView({ behavior: 'smooth' });
-    
-    document.getElementById('clientForm').reset();
-    document.getElementById('saveButton').textContent = 'Salvar Novo Cliente / Atualizar Status';
-    document.getElementById('returnButton').style.display = 'none';
+window.cancelarEdicao = function() {
+    resetForm();
+    // Volta para a última tela visitada (tratativa-view ou dashboard-view)
+    showView(lastView); 
 }
 
 function desenharGraficos(statusContagem) {
     const ctx = document.getElementById('statusChartCanvas').getContext('2d');
     
-    const labels = Object.keys(statusContagem);
-    const data = Object.values(statusContagem);
+    const labels = ['OK', 'Parcial', 'Inativa', 'Sem Imagem', 'Cancelada'];
+    const data = labels.map(label => statusContagem[label] || 0); 
     
     const backgroundColors = [ '#28a745', '#ffc107', '#dc3545', '#007bff', '#6c757d' ];
 
@@ -318,8 +433,9 @@ function desenharGraficos(statusContagem) {
     });
 }
 
+
 // ==========================================
-// PARTE 3: EXPORTAÇÃO (CSV) - CABEÇALHO ATUALIZADO
+// PARTE 3: EXPORTAÇÃO (CSV)
 // ==========================================
 
 function download(filename, text) {
@@ -333,7 +449,6 @@ function download(filename, text) {
     document.body.removeChild(element);
 }
 
-// Cabeçalho CSV com a nova coluna NOME_CLIENTE
 const CSV_HEADER = "CONTA;NOME_CLIENTE;STATUS;CAMERAS_OK;TOTAL_CAMERAS;COBRANCA_OS;ULTIMA_ATUALIZACAO;OBSERVACOES\n";
 
 window.gerarRelatorioFiltrado = function(tipo) {
@@ -351,8 +466,8 @@ window.gerarRelatorioFiltrado = function(tipo) {
             const obsLimpa = cliente.observacoes ? cliente.observacoes.replace(/(\r\n|\n|\r)/gm, " ").replace(/;/g, ",").trim() : '';
 
             const linha = [
-                `"${cliente.numeroConta}"`, // Conta
-                `"${cliente.nomeCliente}"`, // Nome do Cliente
+                `"${cliente.numeroConta}"`, 
+                `"${cliente.nomeCliente}"`, 
                 cliente.status, 
                 cliente.camerasOk || 0, 
                 cliente.totalCameras, 
@@ -403,7 +518,7 @@ window.gerarRelatorioPlantao = async function() {
 
 
 // ==========================================
-// PARTE 4: IMPORTAÇÃO (CSV) - LÓGICA ATUALIZADA
+// PARTE 4: IMPORTAÇÃO (CSV)
 // ==========================================
 
 window.setupImport = function() {
@@ -430,7 +545,6 @@ function lerEImportarCSV(file) {
 
         for (const cliente of clientesImportados) {
             try {
-                // A chave aqui é numeroConta
                 await salvarCliente(cliente); 
                 successCount++;
             } catch (error) {
@@ -456,10 +570,9 @@ function processarCSV(csvText) {
 
     const headers = lines[0].split(';').map(h => h.replace(/"/g, '').trim().toUpperCase());
     
-    // Mapeamento das colunas - ADICIONADO NOME_CLIENTE
     const COLUMNS = {
         'CONTA': headers.indexOf('CONTA'),
-        'NOME_CLIENTE': headers.indexOf('NOME_CLIENTE'), // NOVO
+        'NOME_CLIENTE': headers.indexOf('NOME_CLIENTE'), 
         'STATUS': headers.indexOf('STATUS'),
         'CAMERAS_OK': headers.indexOf('CAMERAS_OK'),
         'TOTAL_CAMERAS': headers.indexOf('TOTAL_CAMERAS'),
@@ -473,11 +586,10 @@ function processarCSV(csvText) {
     return dataLines.map(line => {
         const values = line.match(/(".*?"|[^;]+)/g).map(v => v ? v.replace(/"/g, '').trim() : '');
 
-        // Requer no mínimo CONTA e STATUS e TOTAL_CAMERAS (pelo menos 3 campos)
         if (values.length < 3) return null; 
 
-        const numeroConta = values[COLUMNS.CONTA] || ''; // Chave
-        const nomeCliente = values[COLUMNS.NOME_CLIENTE] || ''; // Novo campo
+        const numeroConta = values[COLUMNS.CONTA] || ''; 
+        const nomeCliente = values[COLUMNS.NOME_CLIENTE] || ''; 
         const status = values[COLUMNS.STATUS] || 'Sem Imagem';
         const camerasOk = parseInt(values[COLUMNS.CAMERAS_OK]) || 0;
         const totalCameras = parseInt(values[COLUMNS.TOTAL_CAMERAS]) || 1;
@@ -493,8 +605,8 @@ function processarCSV(csvText) {
         const necessitaContato = ['Parcial', 'Inativa', 'Sem Imagem'].includes(status);
 
         return {
-            numeroConta: numeroConta, // A CHAVE
-            nomeCliente: nomeCliente, // O NOME
+            numeroConta: numeroConta, 
+            nomeCliente: nomeCliente, 
             totalCameras: totalCameras,
             camerasOk: camerasOk,
             status: status,
@@ -503,7 +615,62 @@ function processarCSV(csvText) {
             ultimaAtualizacao: ultimaAtualizacao,
             necessitaContato: necessitaContato
         };
-    }).filter(cliente => cliente.numeroConta && cliente.nomeCliente); // Requer Conta e Nome
+    }).filter(cliente => cliente.numeroConta && cliente.nomeCliente); 
+}
+
+
+// ==========================================
+// PARTE 5: VERIFICAÇÃO DE TURNO / ÚLTIMA ATUALIZAÇÃO
+// ==========================================
+
+async function getLastUpdateTimestamp() {
+    return new Promise((resolve, reject) => {
+        const transaction = db.transaction([STORE_KEY_UPDATE], 'readonly');
+        const store = transaction.objectStore(STORE_KEY_UPDATE);
+        const request = store.get('lastUpdate');
+        request.onsuccess = (event) => {
+            const result = event.target.result;
+            resolve(result ? result.timestamp : null);
+        };
+        request.onerror = (event) => { reject(event.target.error); };
+    });
+}
+
+/**
+ * Checa a última atualização do banco de dados e exibe a mensagem de turno
+ */
+async function checkLastUpdate() {
+    const lastUpdateTimestamp = await getLastUpdateTimestamp();
+    const infoDiv = document.getElementById('lastUpdateInfo');
+    
+    if (!lastUpdateTimestamp) {
+        infoDiv.textContent = 'Aguardando o primeiro cadastro para registrar o horário de atualização.';
+        return;
+    }
+
+    const lastUpdateDate = new Date(lastUpdateTimestamp);
+    const now = new Date();
+    const diffHours = (now - lastUpdateDate) / (1000 * 60 * 60);
+
+    const dataHoraFormatada = lastUpdateDate.toLocaleString('pt-BR', { dateStyle: 'full', timeStyle: 'medium' });
+
+    let message = `Última modificação da base de clientes: ${dataHoraFormatada}. `;
+    let alertClass = 'alert-info';
+    
+    const limiteHoras = 12; // MUDANÇA: Usando 12h como limite de alerta geral
+
+    if (diffHours < 1) {
+        message += `A atualização ocorreu há menos de 1 hora. Base de dados atualizada pelo turno atual.`;
+        alertClass = 'alert-success';
+    } else if (diffHours >= limiteHoras) {
+        message += `ATENÇÃO: A base de dados não é atualizada há ${Math.round(diffHours)} horas. Verifique se o Repasse de Plantão ocorreu corretamente.`;
+        alertClass = 'alert-danger';
+    } else {
+        message += `A atualização mais recente ocorreu há ${Math.round(diffHours)} horas.`;
+    }
+
+    infoDiv.className = `alert ${alertClass}`;
+    infoDiv.textContent = message;
 }
 
 
@@ -512,12 +679,13 @@ function processarCSV(csvText) {
 // ==========================================
 window.onload = async () => {
     try {
-        // NOTE: Se você já tinha dados cadastrados na versão anterior,
-        // ELES SERÃO PERDIDOS (pois a versão do DB mudou de 1 para 2).
-        // Use a função de Importar CSV para carregar seus clientes antigos.
         await abrirDB();
         await carregarDadosIniciais();
         setupImport(); 
+        
+        // Garante que a tela de cadastro aparece após tudo estar pronto.
+        showView('form-view'); 
+        
     } catch (e) {
         document.querySelector('main').innerHTML = '<h2>Não foi possível iniciar o sistema.</h2><p>Verifique o console e as permissões do seu navegador.</p>';
     }
